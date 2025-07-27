@@ -1,6 +1,5 @@
 use crate::lang::{lexer::Lexer, parser::Parser, source::SourceFile, types::TypeCheckingContext};
 
-pub mod codegen;
 pub mod lang;
 
 /*

@@ -1,4 +1,4 @@
-use std::{collections::HashMap, usize};
+use std::{collections::HashMap, fmt::Write, hash::Hash, usize};
 
 use crate::lang::{
     ast::{
@@ -12,42 +12,152 @@ use crate::lang::{
     token::IdentifierToken,
 };
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum BasicType {
     Void,
-    IntI64,
+    SignedInt(u16),
     Boolean,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FunctionType {
-    pub param_this: Option<SymbolId>,
-    pub args: Vec<(String, SymbolId)>,
+    pub arg_this: Option<SymbolId>,
+    pub args: Vec<(Option<String>, SymbolId)>,
     pub return_type: SymbolId,
 }
 
-#[derive(Debug)]
+impl FunctionType {
+    pub fn internal_mangle(&self) -> String {
+        let mut result = String::new();
+        if let Some(this) = self.arg_this {
+            let _ = result.write_fmt(format_args!("@{}", this.0));
+        }
+        result.push('(');
+        for (i, arg) in self.args.iter().enumerate() {
+            if i > 0 {
+                result.push(',');
+            }
+            let _ = result.write_fmt(format_args!("{}", arg.1.get()));
+        }
+        result.push(')');
+        result
+    }
+}
+
+#[derive(Debug, Clone)]
 pub enum Type {
     Basic(BasicType),
     Function(Box<FunctionType>),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Scope {
+    parent: Option<SymbolId>,
+    id: SymbolId,
+
     symbols: HashMap<String, SymbolId>,
     // prevents accessing locals of parent scopes
     barrier: bool,
 }
 
-#[derive(Debug)]
-pub enum Symbol {
-    TypeDef(Type),
-    Variable(SymbolId),
-    Scope(Scope),
-    Function(FunctionType, SymbolId),
+impl Scope {
+    pub fn internal_mangle(&self) -> String {
+        format!("${}", self.id.get())
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
+pub struct VariableSymbol {
+    parent: SymbolId,
+    var_t: SymbolId,
+    name: String,
+    id: SymbolId,
+}
+
+impl VariableSymbol {
+    pub fn internal_mangle(&self) -> String {
+        self.name.clone()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TypedefSymbol {
+    parent: SymbolId,
+    id: SymbolId,
+    name: String,
+    t: Type,
+}
+
+impl TypedefSymbol {
+    pub fn internal_mangle(&self) -> String {
+        format!("^{}", self.name)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct FunctionSymbol {
+    body: Option<SymbolId>,
+    func_t: FunctionType,
+    parent: SymbolId,
+    name: String,
+    id: SymbolId,
+}
+
+impl FunctionSymbol {
+    pub fn internal_mangle(&self) -> String {
+        format!("{}{}", self.name, self.func_t.internal_mangle())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum Symbol {
+    Function(FunctionSymbol),
+    Variable(VariableSymbol),
+    TypeDef(TypedefSymbol),
+    Scope(Scope),
+}
+
+impl Symbol {
+    /*
+
+    FUNCTIONS: name{`@`this_parameter_type?}({args_type*})
+    VARIABLES: name
+    SCOPE: `$`{scope_id}
+    TYPEDEF: `^`name
+
+     */
+    pub fn mangle(&self) -> String {
+        match self {
+            Symbol::Function(func_sym) => func_sym.internal_mangle(),
+            Symbol::Variable(var_sym) => var_sym.internal_mangle(),
+            Symbol::Scope(scope_sym) => scope_sym.internal_mangle(),
+            Symbol::TypeDef(typedef_sym) => typedef_sym.internal_mangle(),
+        }
+    }
+
+    fn inserted_as(&mut self, id: SymbolId, parent: SymbolId) {
+        match self {
+            Symbol::Function(func_sym) => {
+                func_sym.parent = parent;
+                func_sym.id = id;
+            }
+            Symbol::Variable(var_sym) => {
+                var_sym.parent = parent;
+                var_sym.id = id;
+            }
+            Symbol::Scope(scope_sym) => {
+                scope_sym.parent = Some(parent);
+                scope_sym.id = id;
+            }
+            Symbol::TypeDef(typedef_sym) => {
+                typedef_sym.parent = parent;
+                typedef_sym.id = id;
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SymbolId(usize);
 
 impl SymbolId {
@@ -86,6 +196,30 @@ impl SymbolId {
             _ => Err(*self),
         }
     }
+
+    pub fn get_as_function<'a>(
+        &self,
+        symbol_table: &'a SymbolTable,
+    ) -> Result<&'a FunctionSymbol, SymbolId> {
+        match symbol_table.all_symbols.get(self.0) {
+            Some(Symbol::Function(func_sym)) => Ok(func_sym),
+            _ => Err(*self),
+        }
+    }
+
+    pub fn get_as_function_mut<'a>(
+        &self,
+        symbol_table: &'a mut SymbolTable,
+    ) -> Result<&'a mut FunctionSymbol, SymbolId> {
+        match symbol_table.all_symbols.get_mut(self.0) {
+            Some(Symbol::Function(func_sym)) => Ok(func_sym),
+            _ => Err(*self),
+        }
+    }
+
+    pub fn mangle(&self, symbol_table: &SymbolTable) -> Result<String, SymbolId> {
+        Ok(self.get_symbol(symbol_table)?.mangle())
+    }
 }
 
 #[derive(Debug)]
@@ -102,8 +236,17 @@ impl SymbolTable {
         }
     }
 
-    pub fn insert(&mut self, symbol: Symbol) -> SymbolId {
+    pub fn insert_top_scope(&mut self, mut scope: Scope) -> SymbolId {
         let len = self.all_symbols.len();
+        scope.parent = None;
+        scope.id = SymbolId(len);
+        self.all_symbols.push(Symbol::Scope(scope));
+        SymbolId(len)
+    }
+
+    pub fn insert(&mut self, mut symbol: Symbol, parent: SymbolId) -> SymbolId {
+        let len = self.all_symbols.len();
+        symbol.inserted_as(SymbolId(len), parent);
         self.all_symbols.push(symbol);
         SymbolId(len)
     }
@@ -135,7 +278,9 @@ pub struct Builtins {
     pub bool_t: SymbolId,
     pub void_t: SymbolId,
 
-    pub negate_bool_f: SymbolId,
+    pub operator_negate_bool_f: SymbolId,
+    pub operator_bool_or_bool_f: SymbolId,
+    pub operator_bool_and_bool_f: SymbolId,
 }
 
 #[derive(Debug)]
@@ -147,34 +292,89 @@ pub struct TypeCheckingContext {
     pub builtins: Builtins,
 }
 
+fn gen_bool_t() -> TypedefSymbol {
+    TypedefSymbol {
+        parent: SymbolId(0),
+        id: SymbolId(0),
+        name: "bool".to_string(),
+        t: Type::Basic(BasicType::Boolean),
+    }
+}
+
+fn gen_int_type(bits: u16) -> TypedefSymbol {
+    TypedefSymbol {
+        parent: SymbolId(0),
+        id: SymbolId(0),
+        name: format!("i{}", bits),
+        t: Type::Basic(BasicType::SignedInt(bits)),
+    }
+}
+
+fn gen_void_t() -> TypedefSymbol {
+    TypedefSymbol {
+        parent: SymbolId(0),
+        id: SymbolId(0),
+        name: "void".to_string(),
+        t: Type::Basic(BasicType::Void),
+    }
+}
+
+fn gen_function_t(
+    name: &str,
+    arg_this: Option<SymbolId>,
+    params: &[SymbolId],
+    return_type: SymbolId,
+) -> FunctionSymbol {
+    FunctionSymbol {
+        name: name.to_string(),
+        parent: SymbolId(0),
+        id: SymbolId(0),
+        body: None,
+        func_t: FunctionType {
+            arg_this,
+            args: params.iter().map(|t| (None, *t)).collect(),
+            return_type,
+        },
+    }
+}
+
 impl TypeCheckingContext {
     pub fn new_with_builtins() -> Self {
         let mut symbt = SymbolTable::new();
 
-        let i64_t = symbt.insert(Symbol::TypeDef(Type::Basic(BasicType::IntI64)));
-        let bool_t = symbt.insert(Symbol::TypeDef(Type::Basic(BasicType::Boolean)));
-        let void_t = symbt.insert(Symbol::TypeDef(Type::Basic(BasicType::Void)));
-
-        let negate_bool_f = symbt.insert(Symbol::Function(
-            FunctionType {
-                param_this: None,
-                args: vec![],
-                return_type: bool_t,
-            },
-            bool_t,
-        ));
-        symbt.set_name("negate_bool".to_string(), negate_bool_f);
-
-        let glob_id = symbt.insert(Symbol::Scope(Scope {
-            symbols: HashMap::from([
-                ("i64".to_string(), i64_t),
-                ("bool".to_string(), bool_t),
-                ("void".to_string(), void_t),
-            ]),
+        let glob_id = symbt.insert_top_scope(Scope {
+            symbols: HashMap::new(),
             barrier: true,
-        }));
+            parent: None,
+            id: SymbolId(0),
+        });
 
-        symbt.set_name("global".to_string(), glob_id);
+        let i64_t = symbt.insert(Symbol::TypeDef(gen_int_type(64)), glob_id);
+        let bool_t = symbt.insert(Symbol::TypeDef(gen_bool_t()), glob_id);
+        let void_t = symbt.insert(Symbol::TypeDef(gen_void_t()), glob_id);
+
+        let operator_negate_bool_f = symbt.insert(
+            Symbol::Function(gen_function_t("operator!negate", Some(bool_t), &[], bool_t)),
+            glob_id,
+        );
+        let operator_bool_or_bool_f = symbt.insert(
+            Symbol::Function(gen_function_t(
+                "operator!bool_or",
+                Some(bool_t),
+                &[bool_t],
+                bool_t,
+            )),
+            glob_id,
+        );
+        let operator_bool_and_bool_f = symbt.insert(
+            Symbol::Function(gen_function_t(
+                "operator!bool_and",
+                Some(bool_t),
+                &[bool_t],
+                bool_t,
+            )),
+            glob_id,
+        );
 
         Self {
             scope_stack: vec![glob_id],
@@ -186,34 +386,71 @@ impl TypeCheckingContext {
                 bool_t,
                 void_t,
 
-                negate_bool_f,
+                operator_negate_bool_f,
+                operator_bool_or_bool_f,
+                operator_bool_and_bool_f,
             },
         }
     }
 
-    fn unchecked_define_function(
+    fn define_function(
         &mut self,
         func_type: FunctionType,
+        name: String,
     ) -> Result<(SymbolId, SymbolId), IRError> {
+        if self.peek_scope()?.symbols.contains_key(&name) {
+            return Err(IRError::DuplicateFunctionName(name.clone()));
+        }
+
         let body_scope = Scope {
+            parent: None,
+            id: SymbolId(0),
             symbols: HashMap::new(),
             barrier: true, // is a function, can't access higher up locals
         };
 
-        for (arg_name, arg_t) in func_type.args.iter() {
-            if arg_name == "this" {
+        let func_id = self.symbol_table.insert(
+            Symbol::Function(FunctionSymbol {
+                func_t: func_type.clone(),
+                parent: SymbolId(0),
+                name: name.clone(),
+                id: SymbolId(0),
+                body: None,
+            }),
+            self.peek_id()?,
+        );
+
+        for (arg_name, arg_t) in func_type.args.into_iter() {
+            let Some(arg_name) = arg_name else {
+                return Err(IRError::IllegalUnnamedArgument);
+            };
+            if &arg_name == "this" {
                 return Err(IRError::IllegalArgumentName(arg_name.clone()));
             }
-            if body_scope.symbols.contains_key(arg_name) {
+            if body_scope.symbols.contains_key(&arg_name) {
                 return Err(IRError::DuplicateArgumentName(arg_name.clone()));
             }
-            self.symbol_table.insert(Symbol::Variable(*arg_t));
+            self.symbol_table.insert(
+                Symbol::Variable(VariableSymbol {
+                    parent: SymbolId(0),
+                    id: SymbolId(0),
+                    var_t: arg_t,
+                    name: arg_name,
+                }),
+                func_id,
+            );
         }
 
-        let body_id = self.symbol_table.insert(Symbol::Scope(body_scope));
-        let func_symb = Symbol::Function(func_type, body_id);
+        let body_id = self.symbol_table.insert(Symbol::Scope(body_scope), func_id);
 
-        Ok((self.symbol_table.insert(func_symb), body_id))
+        func_id
+            .get_as_function_mut(&mut self.symbol_table)
+            .map_err(|i| IRError::BuiltinError(BuiltinIRError::IllegalSymbolInScopeStack(i)))?
+            .body = Some(body_id);
+
+        self.peek_scope_mut()?.symbols.insert(name, func_id);
+
+        Ok((func_id, body_id))
     }
 
     fn push(&mut self, id: SymbolId) {
@@ -228,16 +465,18 @@ impl TypeCheckingContext {
         self.scope_stack.last().copied()
     }
 
+    fn peek_id(&self) -> Result<SymbolId, IRError> {
+        self.peek().ok_or(IRError::UnscopedAccess)
+    }
+
     fn peek_scope(&self) -> Result<&Scope, IRError> {
-        self.peek()
-            .ok_or(IRError::UnscopedAccess)?
+        self.peek_id()?
             .get_as_scope(&self.symbol_table)
             .map_err(|i| IRError::BuiltinError(BuiltinIRError::IllegalSymbolInScopeStack(i)))
     }
 
     fn peek_scope_mut(&mut self) -> Result<&mut Scope, IRError> {
-        self.peek()
-            .ok_or(IRError::UnscopedAccess)?
+        self.peek_id()?
             .get_as_scope_mut(&mut self.symbol_table)
             .map_err(|i| IRError::BuiltinError(BuiltinIRError::IllegalSymbolInScopeStack(i)))
     }
@@ -263,7 +502,7 @@ impl TypeCheckingContext {
             .map_err(IRError::InvalidSymbolId)?;
 
         let expr_type = match sym {
-            Symbol::Variable(t) => *t,
+            Symbol::Variable(t) => t.var_t,
             Symbol::Scope(_) => return Err(IRError::InvalidReferableSymbol(id)),
             Symbol::TypeDef(_) => return Err(IRError::InvalidReferableSymbol(id)),
             // TODO: implement getting function pointers probably ?
@@ -385,14 +624,20 @@ impl TypeCheckingContext {
                 i
             }
             Err(_) => {
-                let var_id = self
-                    .symbol_table
-                    .insert(Symbol::Variable(match irstmt.expr_type {
+                let var_id = self.symbol_table.insert(
+                    Symbol::Variable(match irstmt.expr_type {
                         TypeResolution::Unresolved => {
                             return Err(IRError::TypeShouldBeResolved(irstmt.expr_type));
                         }
-                        TypeResolution::Resolved(t) => t,
-                    }));
+                        TypeResolution::Resolved(t) => VariableSymbol {
+                            name: name.value.clone(),
+                            parent: SymbolId(0),
+                            id: SymbolId(0),
+                            var_t: t,
+                        },
+                    }),
+                    self.peek_id()?,
+                );
                 let scope = self.peek_scope_mut()?;
                 scope.symbols.insert(name.value.clone(), var_id);
                 var_id
@@ -436,7 +681,7 @@ impl TypeCheckingContext {
             .map_err(IRError::InvalidSymbolId)?;
 
         let func_t = match f_sym {
-            Symbol::Function(f, _) => f,
+            Symbol::Function(func_s) => &func_s.func_t,
             _ => return Err(IRError::ReferedSymbolIsNotCallable(f_id)),
         };
 
@@ -574,11 +819,14 @@ impl TypeCheckingContext {
             return Err(IRError::MultipleMainFunctionDeclarations(id));
         }
 
-        let (func_id, body_id) = self.unchecked_define_function(FunctionType {
-            param_this: None,
-            args: Vec::new(),
-            return_type: self.builtins.void_t,
-        })?;
+        let (func_id, body_id) = self.define_function(
+            FunctionType {
+                arg_this: None,
+                args: Vec::new(),
+                return_type: self.builtins.void_t,
+            },
+            "main".to_string(),
+        )?;
 
         self.main_function = Some(func_id);
         self.push(body_id);

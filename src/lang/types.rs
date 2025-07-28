@@ -575,13 +575,24 @@ impl TypeCheckingContext {
     ) -> Result<IRNode<IRStatement>, IRError> {
         // TODO: Check that statement is discardable
 
-        let irstmt = self.construct_ir_statement(stmt)?;
-        Ok(IRNode {
-            value: Box::new(IRStatement::Action(irstmt.value, IRAction::DiscardIt)),
+        let mut irstmt = self.construct_ir_statement(stmt)?;
 
-            // FIXME: This is wrong, i'm lazy
-            expr_type: TypeResolution::Unresolved,
-        })
+        match &mut *irstmt.value {
+            IRStatement::Actions(_, actions) => {
+                actions.push(IRAction::DiscardIt);
+
+                // FIXME: Check expr_type to see if it's discardable, and update expr_type
+
+                Ok(irstmt)
+            }
+            _ => Ok(IRNode {
+                value: Box::new(IRStatement::Actions(
+                    irstmt.value,
+                    vec![IRAction::DiscardIt],
+                )),
+                expr_type: TypeResolution::Resolved(self.builtins.void_t),
+            }),
+        }
     }
 
     pub fn construct_ir_action_use_on_it(
@@ -590,7 +601,7 @@ impl TypeCheckingContext {
         func: IdentifierToken,
         args: Vec<Expression>,
     ) -> Result<IRNode<IRStatement>, IRError> {
-        let irstmt = self.construct_ir_statement(stmt)?;
+        let mut irstmt = self.construct_ir_statement(stmt)?;
 
         // FIXME: Find actual function
         let func_id = SymbolId(usize::MAX);
@@ -601,14 +612,26 @@ impl TypeCheckingContext {
         }
         // TODO: Check that arguments are valid (count + types)
 
-        Ok(IRNode {
-            value: Box::new(IRStatement::Action(
-                irstmt.value,
-                IRAction::UseOnIt(func, func_id, irargs),
-            )),
-            // FIXME: This is wrong, i'm lazy
-            expr_type: TypeResolution::Unresolved,
-        })
+        match &mut *irstmt.value {
+            IRStatement::Actions(_, actions) => {
+                actions.push(IRAction::UseOnIt(func, func_id, irargs));
+
+                // FIXME: This is wrong, i'm lazy
+                irstmt.expr_type = TypeResolution::Unresolved;
+
+                Ok(irstmt)
+            }
+            _ => {
+                Ok(IRNode {
+                    value: Box::new(IRStatement::Actions(
+                        irstmt.value,
+                        vec![IRAction::UseOnIt(func, func_id, irargs)],
+                    )),
+                    // FIXME: This is wrong, i'm lazy
+                    expr_type: TypeResolution::Unresolved,
+                })
+            }
+        }
     }
 
     pub fn construct_ir_action_call_it(
@@ -616,7 +639,7 @@ impl TypeCheckingContext {
         stmt: Statement,
         name: IdentifierToken,
     ) -> Result<IRNode<IRStatement>, IRError> {
-        let irstmt = self.construct_ir_statement(stmt)?;
+        let mut irstmt = self.construct_ir_statement(stmt)?;
 
         let var_id = match self.lookup(&name.value) {
             Ok(i) => {
@@ -644,13 +667,19 @@ impl TypeCheckingContext {
             }
         };
 
-        Ok(IRNode {
-            value: Box::new(IRStatement::Action(
-                irstmt.value,
-                IRAction::CallIt(name, var_id),
-            )),
-            expr_type: irstmt.expr_type,
-        })
+        match &mut *irstmt.value {
+            IRStatement::Actions(_, actions) => {
+                actions.push(IRAction::CallIt(name, var_id));
+                Ok(irstmt)
+            }
+            _ => Ok(IRNode {
+                value: Box::new(IRStatement::Actions(
+                    irstmt.value,
+                    vec![IRAction::CallIt(name, var_id)],
+                )),
+                expr_type: irstmt.expr_type,
+            }),
+        }
     }
 
     pub fn construct_ir_action(

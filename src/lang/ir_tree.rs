@@ -23,16 +23,18 @@ pub enum BuiltinIRError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IRError {
+    TypeMismatch(TypeResolution, TypeResolution), // Expected, Actual
     MultipleMainFunctionDeclarations(SymbolId),
     ReferedSymbolIsNotCallable(SymbolId),
     TypeShouldBeResolved(TypeResolution),
     InvalidReferableSymbol(SymbolId),
     DuplicateArgumentName(String),
+    DuplicateFunctionName(String),
     BuiltinError(BuiltinIRError),
     IllegalArgumentName(String),
     UnknownIdentifier(String),
     InvalidSymbolId(SymbolId),
-    TypeMismatch(TypeResolution, TypeResolution), // Expected, Actual
+    IllegalUnnamedArgument,
     InvalidDiscardAction,
     UnscopedAccess,
 }
@@ -80,8 +82,7 @@ pub struct IRIfStatement {
 pub enum IRStatement {
     VoidDeclaration(Box<IRDeclaration>),
     Take(IRExpression),
-    Action(Box<IRStatement>, IRAction),
-
+    Actions(Box<IRStatement>, Vec<IRAction>),
     WhileLoop(IRWhileLoop),
     IfStatement(IRIfStatement),
 }

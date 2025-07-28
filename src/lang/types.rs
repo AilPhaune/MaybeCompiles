@@ -6,8 +6,8 @@ use crate::lang::{
         MainFunctionDeclaration, Statement,
     },
     ir_tree::{
-        BuiltinIRError, IRAction, IRDeclaration, IRError, IRExpression, IRNode, IRStatement,
-        IRTypeMainFunction, IRWhileLoop, TypeResolution,
+        BuiltinIRError, IRAction, IRActions, IRDeclaration, IRError, IRExpression, IRNode,
+        IRStatement, IRTypeMainFunction, IRWhileLoop, TypeResolution,
     },
     token::IdentifierToken,
 };
@@ -578,18 +578,24 @@ impl TypeCheckingContext {
         let mut irstmt = self.construct_ir_statement(stmt)?;
 
         match &mut *irstmt.value {
-            IRStatement::Actions(_, actions) => {
-                actions.push(IRAction::DiscardIt);
+            IRStatement::Actions(iraction) => {
+                iraction.actions.push(IRAction::DiscardIt);
 
-                // FIXME: Check expr_type to see if it's discardable, and update expr_type
-
-                Ok(irstmt)
+                // Check if it's discardable
+                if let Some(_) = iraction.type_stack.pop() {
+                    // Discarded the value by removing it from the stack
+                    Ok(irstmt)
+                } else {
+                    // No value to discard
+                    Err(IRError::InvalidDiscardAction)
+                }
             }
             _ => Ok(IRNode {
-                value: Box::new(IRStatement::Actions(
-                    irstmt.value,
-                    vec![IRAction::DiscardIt],
-                )),
+                value: Box::new(IRStatement::Actions(IRActions {
+                    statement: irstmt.value,
+                    actions: vec![IRAction::DiscardIt],
+                    type_stack: vec![], // nothing, we discarded the value
+                })),
                 expr_type: TypeResolution::Resolved(self.builtins.void_t),
             }),
         }
@@ -611,26 +617,34 @@ impl TypeCheckingContext {
             irargs.push(*self.construct_ir_expression(arg)?.value);
         }
         // TODO: Check that arguments are valid (count + types)
+        // TODO: Check that irstmt.expr_type is the same type as the function's this arg
 
         match &mut *irstmt.value {
-            IRStatement::Actions(_, actions) => {
-                actions.push(IRAction::UseOnIt(func, func_id, irargs));
+            IRStatement::Actions(iractions) => {
+                iractions
+                    .actions
+                    .push(IRAction::UseOnIt(func, func_id, irargs));
 
-                // FIXME: This is wrong, i'm lazy
-                irstmt.expr_type = TypeResolution::Unresolved;
+                // FIXME:
+                let func_rt_type = SymbolId(usize::MAX);
+
+                iractions.type_stack.push(func_rt_type);
+                irstmt.expr_type = TypeResolution::Resolved(func_rt_type);
 
                 Ok(irstmt)
             }
-            _ => {
-                Ok(IRNode {
-                    value: Box::new(IRStatement::Actions(
-                        irstmt.value,
-                        vec![IRAction::UseOnIt(func, func_id, irargs)],
-                    )),
-                    // FIXME: This is wrong, i'm lazy
-                    expr_type: TypeResolution::Unresolved,
-                })
-            }
+            _ => Ok(IRNode {
+                value: Box::new(IRStatement::Actions(IRActions {
+                    statement: irstmt.value,
+                    actions: vec![IRAction::UseOnIt(func, func_id, irargs)],
+                    type_stack: vec![
+                        // FIXME: Should be the return type of the function
+                        SymbolId(usize::MAX),
+                    ],
+                })),
+                // FIXME: Should be the return type of the function
+                expr_type: TypeResolution::Unresolved,
+            }),
         }
     }
 
@@ -668,15 +682,17 @@ impl TypeCheckingContext {
         };
 
         match &mut *irstmt.value {
-            IRStatement::Actions(_, actions) => {
-                actions.push(IRAction::CallIt(name, var_id));
+            IRStatement::Actions(iractions) => {
+                iractions.actions.push(IRAction::CallIt(name, var_id));
+                // CallIt doesn't consume nor produce any value, it just allows to directly use the value that was saved in the variable
                 Ok(irstmt)
             }
             _ => Ok(IRNode {
-                value: Box::new(IRStatement::Actions(
-                    irstmt.value,
-                    vec![IRAction::CallIt(name, var_id)],
-                )),
+                value: Box::new(IRStatement::Actions(IRActions {
+                    statement: irstmt.value,
+                    actions: vec![IRAction::CallIt(name, var_id)],
+                    type_stack: vec![irstmt.expr_type.type_id_now_or_err()?],
+                })),
                 expr_type: irstmt.expr_type,
             }),
         }

@@ -4,10 +4,24 @@ use crate::lang::{
     types::SymbolId,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TypeResolution {
     Resolved(SymbolId),
     Unresolved,
+}
+
+impl TypeResolution {
+    pub fn type_id_now(&self) -> Option<SymbolId> {
+        match self {
+            TypeResolution::Resolved(t) => Some(*t),
+            TypeResolution::Unresolved => None,
+        }
+    }
+
+    pub fn type_id_now_or_err(&self) -> Result<SymbolId, IRError> {
+        self.type_id_now()
+            .ok_or_else(|| IRError::TypeShouldBeResolved(*self))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,10 +93,17 @@ pub struct IRIfStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IRActions {
+    pub statement: Box<IRStatement>,
+    pub actions: Vec<IRAction>,
+    pub type_stack: Vec<SymbolId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IRStatement {
     VoidDeclaration(Box<IRDeclaration>),
     Take(IRExpression),
-    Actions(Box<IRStatement>, Vec<IRAction>),
+    Actions(IRActions),
     WhileLoop(IRWhileLoop),
     IfStatement(IRIfStatement),
 }

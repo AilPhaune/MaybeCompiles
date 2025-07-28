@@ -1,6 +1,8 @@
 pub mod ast;
+pub mod builtins;
 pub mod ir_tree;
 pub mod lexer;
+pub mod module;
 pub mod parser;
 pub mod source;
 pub mod token;

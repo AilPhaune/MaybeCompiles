@@ -1,4 +1,7 @@
-use crate::lang::{lexer::Lexer, parser::Parser, source::SourceFile, types::TypeCheckingContext};
+use crate::lang::{
+    builtins::int_module::SignedIntegerModule, lexer::Lexer, parser::Parser, source::SourceFile,
+    types::TypeCheckingContext,
+};
 
 pub mod lang;
 
@@ -53,7 +56,9 @@ Done.
     println!("\nEnd parsing");
     println!();
 
-    let mut type_checking_context = TypeCheckingContext::new_with_builtins();
+    let i64_module = SignedIntegerModule::create(64).unwrap();
+
+    let mut type_checking_context = TypeCheckingContext::new_with_builtins(vec![&i64_module]);
 
     let ir = type_checking_context.construct_ir_declaration(expr.result);
 

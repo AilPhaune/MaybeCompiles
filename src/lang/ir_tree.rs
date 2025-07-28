@@ -42,6 +42,7 @@ pub enum IRError {
     ReferedSymbolIsNotCallable(SymbolId),
     TypeShouldBeResolved(TypeResolution),
     InvalidReferableSymbol(SymbolId),
+    InvalidFunctionSymbol(SymbolId),
     DuplicateArgumentName(String),
     DuplicateFunctionName(String),
     BuiltinError(BuiltinIRError),

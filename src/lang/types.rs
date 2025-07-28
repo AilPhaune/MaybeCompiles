@@ -9,6 +9,7 @@ use crate::lang::{
         BuiltinIRError, IRAction, IRActions, IRDeclaration, IRError, IRExpression, IRNode,
         IRStatement, IRTypeMainFunction, IRWhileLoop, TypeResolution,
     },
+    module::LanguageModule,
     token::IdentifierToken,
 };
 
@@ -21,26 +22,27 @@ pub enum BasicType {
 
 #[derive(Debug, Clone)]
 pub struct FunctionType {
-    pub arg_this: Option<SymbolId>,
+    pub arg_this: SymbolId,
     pub args: Vec<(Option<String>, SymbolId)>,
     pub return_type: SymbolId,
 }
 
+pub fn internal_mangle_func(arg_this: SymbolId, args: impl Iterator<Item = SymbolId>) -> String {
+    let mut result = format!("@{}", arg_this.get());
+    result.push('(');
+    for (i, arg) in args.enumerate() {
+        if i > 0 {
+            result.push(',');
+        }
+        let _ = result.write_fmt(format_args!("{}", arg.get()));
+    }
+    result.push(')');
+    result
+}
+
 impl FunctionType {
     pub fn internal_mangle(&self) -> String {
-        let mut result = String::new();
-        if let Some(this) = self.arg_this {
-            let _ = result.write_fmt(format_args!("@{}", this.0));
-        }
-        result.push('(');
-        for (i, arg) in self.args.iter().enumerate() {
-            if i > 0 {
-                result.push(',');
-            }
-            let _ = result.write_fmt(format_args!("{}", arg.1.get()));
-        }
-        result.push(')');
-        result
+        internal_mangle_func(self.arg_this, self.args.iter().map(|t| t.1))
     }
 }
 
@@ -52,12 +54,12 @@ pub enum Type {
 
 #[derive(Debug, Clone)]
 pub struct Scope {
-    parent: Option<SymbolId>,
-    id: SymbolId,
+    pub parent: Option<SymbolId>,
+    pub id: SymbolId,
 
-    symbols: HashMap<String, SymbolId>,
+    pub symbols: HashMap<String, SymbolId>,
     // prevents accessing locals of parent scopes
-    barrier: bool,
+    pub barrier: bool,
 }
 
 impl Scope {
@@ -68,10 +70,10 @@ impl Scope {
 
 #[derive(Debug, Clone)]
 pub struct VariableSymbol {
-    parent: SymbolId,
-    var_t: SymbolId,
-    name: String,
-    id: SymbolId,
+    pub parent: SymbolId,
+    pub var_t: SymbolId,
+    pub name: String,
+    pub id: SymbolId,
 }
 
 impl VariableSymbol {
@@ -82,10 +84,10 @@ impl VariableSymbol {
 
 #[derive(Debug, Clone)]
 pub struct TypedefSymbol {
-    parent: SymbolId,
-    id: SymbolId,
-    name: String,
-    t: Type,
+    pub parent: SymbolId,
+    pub id: SymbolId,
+    pub name: String,
+    pub t: Type,
 }
 
 impl TypedefSymbol {
@@ -161,6 +163,10 @@ impl Symbol {
 pub struct SymbolId(usize);
 
 impl SymbolId {
+    pub fn undefined() -> Self {
+        Self(usize::MAX)
+    }
+
     pub fn new(id: usize) -> Self {
         Self(id)
     }
@@ -247,7 +253,13 @@ impl SymbolTable {
     pub fn insert(&mut self, mut symbol: Symbol, parent: SymbolId) -> SymbolId {
         let len = self.all_symbols.len();
         symbol.inserted_as(SymbolId(len), parent);
+
+        if let Ok(scope) = parent.get_as_scope_mut(self) {
+            scope.symbols.insert(symbol.mangle(), SymbolId(len));
+        }
+
         self.all_symbols.push(symbol);
+
         SymbolId(len)
     }
 
@@ -277,19 +289,17 @@ pub struct Builtins {
     pub i64_t: SymbolId,
     pub bool_t: SymbolId,
     pub void_t: SymbolId,
-
-    pub operator_negate_bool_f: SymbolId,
-    pub operator_bool_or_bool_f: SymbolId,
-    pub operator_bool_and_bool_f: SymbolId,
 }
 
 #[derive(Debug)]
-pub struct TypeCheckingContext {
+pub struct TypeCheckingContext<'a> {
     pub scope_stack: Vec<SymbolId>,
     pub symbol_table: SymbolTable,
     pub global: SymbolId,
     pub main_function: Option<SymbolId>,
     pub builtins: Builtins,
+
+    pub modules: Vec<&'a dyn LanguageModule>,
 }
 
 fn gen_bool_t() -> TypedefSymbol {
@@ -319,9 +329,9 @@ fn gen_void_t() -> TypedefSymbol {
     }
 }
 
-fn gen_function_t(
+pub fn gen_function_t(
     name: &str,
-    arg_this: Option<SymbolId>,
+    arg_this: SymbolId,
     params: &[SymbolId],
     return_type: SymbolId,
 ) -> FunctionSymbol {
@@ -338,8 +348,8 @@ fn gen_function_t(
     }
 }
 
-impl TypeCheckingContext {
-    pub fn new_with_builtins() -> Self {
+impl<'a> TypeCheckingContext<'a> {
+    pub fn new_with_builtins(modules: Vec<&'a dyn LanguageModule>) -> Self {
         let mut symbt = SymbolTable::new();
 
         let glob_id = symbt.insert_top_scope(Scope {
@@ -353,28 +363,17 @@ impl TypeCheckingContext {
         let bool_t = symbt.insert(Symbol::TypeDef(gen_bool_t()), glob_id);
         let void_t = symbt.insert(Symbol::TypeDef(gen_void_t()), glob_id);
 
-        let operator_negate_bool_f = symbt.insert(
-            Symbol::Function(gen_function_t("operator!negate", Some(bool_t), &[], bool_t)),
-            glob_id,
-        );
-        let operator_bool_or_bool_f = symbt.insert(
-            Symbol::Function(gen_function_t(
-                "operator!bool_or",
-                Some(bool_t),
-                &[bool_t],
-                bool_t,
-            )),
-            glob_id,
-        );
-        let operator_bool_and_bool_f = symbt.insert(
-            Symbol::Function(gen_function_t(
-                "operator!bool_and",
-                Some(bool_t),
-                &[bool_t],
-                bool_t,
-            )),
-            glob_id,
-        );
+        for module in modules.iter() {
+            module.insert_symbols(
+                &mut symbt,
+                &Builtins {
+                    i64_t,
+                    bool_t,
+                    void_t,
+                },
+                glob_id,
+            );
+        }
 
         Self {
             scope_stack: vec![glob_id],
@@ -385,11 +384,8 @@ impl TypeCheckingContext {
                 i64_t,
                 bool_t,
                 void_t,
-
-                operator_negate_bool_f,
-                operator_bool_or_bool_f,
-                operator_bool_and_bool_f,
             },
+            modules,
         }
     }
 
@@ -492,6 +488,31 @@ impl TypeCheckingContext {
         })
     }
 
+    fn lookup_function(
+        &self,
+        name: &str,
+        this_arg: SymbolId,
+        arg_types: &[SymbolId],
+    ) -> Result<SymbolId, IRError> {
+        let mangled = format!(
+            "{}{}",
+            name,
+            internal_mangle_func(this_arg, arg_types.iter().copied())
+        );
+
+        for scope_id in self.scope_stack.iter().rev() {
+            if let Ok(scope) = scope_id.get_as_scope(&self.symbol_table) {
+                if let Some(func_id) = scope.symbols.get(&mangled) {
+                    if func_id.get_as_function(&self.symbol_table).is_ok() {
+                        return Ok(*func_id);
+                    }
+                }
+            }
+        }
+
+        return Err(IRError::UnknownIdentifier(mangled));
+    }
+
     pub fn construct_ir_identifier(
         &mut self,
         idt: IdentifierToken,
@@ -565,16 +586,30 @@ impl TypeCheckingContext {
         &mut self,
         stmt: Statement,
     ) -> Result<IRNode<IRStatement>, IRError> {
-        // TODO
-        todo!("construct_ir_action_return")
+        let mut irstmt = self.construct_ir_statement(stmt)?;
+
+        match &mut *irstmt.value {
+            IRStatement::Actions(iraction) => {
+                iraction.actions.push(IRAction::ReturnIt);
+                iraction.type_stack.clear();
+                irstmt.expr_type = TypeResolution::Resolved(self.builtins.void_t);
+                Ok(irstmt)
+            }
+            _ => Ok(IRNode {
+                value: Box::new(IRStatement::Actions(IRActions {
+                    statement: irstmt.value,
+                    actions: vec![IRAction::ReturnIt],
+                    type_stack: vec![], // nothing, we returned the value
+                })),
+                expr_type: TypeResolution::Resolved(self.builtins.void_t),
+            }),
+        }
     }
 
     pub fn construct_ir_action_discard(
         &mut self,
         stmt: Statement,
     ) -> Result<IRNode<IRStatement>, IRError> {
-        // TODO: Check that statement is discardable
-
         let mut irstmt = self.construct_ir_statement(stmt)?;
 
         match &mut *irstmt.value {
@@ -584,6 +619,9 @@ impl TypeCheckingContext {
                 // Check if it's discardable
                 if let Some(_) = iraction.type_stack.pop() {
                     // Discarded the value by removing it from the stack
+                    irstmt.expr_type = TypeResolution::Resolved(
+                        *iraction.type_stack.last().unwrap_or(&self.builtins.void_t),
+                    );
                     Ok(irstmt)
                 } else {
                     // No value to discard
@@ -609,24 +647,28 @@ impl TypeCheckingContext {
     ) -> Result<IRNode<IRStatement>, IRError> {
         let mut irstmt = self.construct_ir_statement(stmt)?;
 
-        // FIXME: Find actual function
-        let func_id = SymbolId(usize::MAX);
-
         let mut irargs = Vec::new();
+        let mut args_t = Vec::new();
         for arg in args {
-            irargs.push(*self.construct_ir_expression(arg)?.value);
+            let irarg = self.construct_ir_expression(arg)?;
+            irargs.push(*irarg.value);
+            args_t.push(irarg.expr_type.type_id_now_or_err()?);
         }
-        // TODO: Check that arguments are valid (count + types)
-        // TODO: Check that irstmt.expr_type is the same type as the function's this arg
+
+        let func_id =
+            self.lookup_function(&func.value, irstmt.expr_type.type_id_now_or_err()?, &args_t)?;
+
+        let func_rt_type = func_id
+            .get_as_function(&self.symbol_table)
+            .map_err(|id| IRError::InvalidFunctionSymbol(id))?
+            .func_t
+            .return_type;
 
         match &mut *irstmt.value {
             IRStatement::Actions(iractions) => {
                 iractions
                     .actions
                     .push(IRAction::UseOnIt(func, func_id, irargs));
-
-                // FIXME:
-                let func_rt_type = SymbolId(usize::MAX);
 
                 iractions.type_stack.push(func_rt_type);
                 irstmt.expr_type = TypeResolution::Resolved(func_rt_type);
@@ -637,13 +679,9 @@ impl TypeCheckingContext {
                 value: Box::new(IRStatement::Actions(IRActions {
                     statement: irstmt.value,
                     actions: vec![IRAction::UseOnIt(func, func_id, irargs)],
-                    type_stack: vec![
-                        // FIXME: Should be the return type of the function
-                        SymbolId(usize::MAX),
-                    ],
+                    type_stack: vec![irstmt.expr_type.type_id_now_or_err()?, func_rt_type],
                 })),
-                // FIXME: Should be the return type of the function
-                expr_type: TypeResolution::Unresolved,
+                expr_type: TypeResolution::Resolved(func_rt_type),
             }),
         }
     }
@@ -866,7 +904,7 @@ impl TypeCheckingContext {
 
         let (func_id, body_id) = self.define_function(
             FunctionType {
-                arg_this: None,
+                arg_this: self.builtins.void_t,
                 args: Vec::new(),
                 return_type: self.builtins.void_t,
             },

@@ -1,6 +1,7 @@
 use std::num::NonZeroU16;
 
 use crate::lang::{
+    ast::ComparisonOperator,
     module::LanguageModule,
     types::{
         BasicType, Builtins, Symbol, SymbolId, SymbolTable, Type, TypedefSymbol, gen_function_t,
@@ -64,6 +65,17 @@ impl LanguageModule for SignedIntegerModule {
         );
         symbol_table.insert(
             Symbol::Function(gen_function_t("operator!add", type_id, &[type_id], type_id)),
+            global,
+        );
+
+        // == OPERATOR
+        symbol_table.insert(
+            Symbol::Function(gen_function_t(
+                ComparisonOperator::Equals.internal_operator_function_magled(),
+                type_id,
+                &[type_id],
+                builtins.bool_t,
+            )),
             global,
         );
 

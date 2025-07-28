@@ -1,5 +1,8 @@
 use crate::lang::{
-    builtins::int_module::SignedIntegerModule, lexer::Lexer, parser::Parser, source::SourceFile,
+    builtins::{bool_module::BooleanModule, int_module::SignedIntegerModule},
+    lexer::Lexer,
+    parser::Parser,
+    source::SourceFile,
     types::TypeCheckingContext,
 };
 
@@ -57,8 +60,10 @@ Done.
     println!();
 
     let i64_module = SignedIntegerModule::create(64).unwrap();
+    let bool_module = BooleanModule::new();
 
-    let mut type_checking_context = TypeCheckingContext::new_with_builtins(vec![&i64_module]);
+    let mut type_checking_context =
+        TypeCheckingContext::new_with_builtins(vec![&i64_module, &bool_module]);
 
     let ir = type_checking_context.construct_ir_declaration(expr.result);
 

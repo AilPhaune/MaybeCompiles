@@ -20,7 +20,20 @@ pub enum ComparisonOperator {
     GreaterThanOrEqual,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl ComparisonOperator {
+    pub fn internal_operator_function_magled(&self) -> &'static str {
+        match self {
+            ComparisonOperator::Equals => "operator!eq",
+            ComparisonOperator::NotEquals => "operator!neq",
+            ComparisonOperator::LessThan => "operator!lt",
+            ComparisonOperator::LessThanOrEqual => "operator!lte",
+            ComparisonOperator::GreaterThan => "operator!gt",
+            ComparisonOperator::GreaterThanOrEqual => "operator!gte",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BooleanOperator {
     And,
     Or,
@@ -30,6 +43,21 @@ pub enum BooleanOperator {
     Xnor,
     Implies,
     ImpliedBy,
+}
+
+impl BooleanOperator {
+    pub fn internal_operator_function_magled(&self) -> &'static str {
+        match self {
+            BooleanOperator::And => "operator!bool_and",
+            BooleanOperator::Or => "operator!bool_or",
+            BooleanOperator::Xor => "operator!bool_xor",
+            BooleanOperator::Nand => "operator!bool_nand",
+            BooleanOperator::Nor => "operator!bool_nor",
+            BooleanOperator::Xnor => "operator!bool_xnor",
+            BooleanOperator::Implies => "operator!bool_implies",
+            BooleanOperator::ImpliedBy => "operator!bool_implied_by",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

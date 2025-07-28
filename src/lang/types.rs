@@ -6,8 +6,8 @@ use crate::lang::{
         MainFunctionDeclaration, Statement,
     },
     ir_tree::{
-        BuiltinIRError, IRAction, IRActions, IRDeclaration, IRError, IRExpression, IRNode,
-        IRStatement, IRTypeMainFunction, IRWhileLoop, TypeResolution,
+        BuiltinIRError, IRAction, IRActions, IRDeclaration, IRError, IRExpression, IRIfStatement,
+        IRNode, IRStatement, IRTypeMainFunction, IRWhileLoop, TypeResolution,
     },
     module::LanguageModule,
     token::IdentifierToken,
@@ -225,6 +225,35 @@ impl SymbolId {
 
     pub fn mangle(&self, symbol_table: &SymbolTable) -> Result<String, SymbolId> {
         Ok(self.get_symbol(symbol_table)?.mangle())
+    }
+
+    pub fn get_as_variable<'a>(
+        &self,
+        symbol_table: &'a SymbolTable,
+    ) -> Result<&'a VariableSymbol, SymbolId> {
+        match symbol_table.all_symbols.get(self.0) {
+            Some(Symbol::Variable(var_sym)) => Ok(var_sym),
+            _ => Err(*self),
+        }
+    }
+
+    pub fn get_as_variable_mut<'a>(
+        &self,
+        symbol_table: &'a mut SymbolTable,
+    ) -> Result<&'a mut VariableSymbol, SymbolId> {
+        match symbol_table.all_symbols.get_mut(self.0) {
+            Some(Symbol::Variable(var_sym)) => Ok(var_sym),
+            _ => Err(*self),
+        }
+    }
+
+    pub fn is_static(&self, symbol_table: &SymbolTable) -> Result<bool, SymbolId> {
+        match self.get_symbol(symbol_table)? {
+            Symbol::Variable(_) => Ok(false),
+            Symbol::TypeDef(_) => Ok(true),
+            Symbol::Function(_) => Ok(true),
+            Symbol::Scope(_) => Ok(false),
+        }
     }
 }
 
@@ -478,6 +507,28 @@ impl<'a> TypeCheckingContext<'a> {
     }
 
     fn lookup(&self, name: &str) -> Result<SymbolId, IRError> {
+        let mut barriered = false;
+
+        for scope_id in self.scope_stack.iter().rev() {
+            if let Ok(scope) = scope_id.get_as_scope(&self.symbol_table) {
+                if scope.barrier {
+                    barriered = true;
+                }
+
+                if let Some(id) = scope.symbols.get(name) {
+                    if !barriered
+                        || id
+                            .is_static(&self.symbol_table)
+                            .map_err(|id| IRError::InvalidSymbolId(id))?
+                    {
+                        return Ok(*id);
+                    } else {
+                        return Err(IRError::IllegalAccess(name.to_string(), *id));
+                    }
+                }
+            }
+        }
+
         // TODO: implement parent lookup
         self.peek_scope().and_then(|scope| {
             scope
@@ -567,8 +618,26 @@ impl<'a> TypeCheckingContext<'a> {
         expr: Expression,
         unless_expr: Expression,
     ) -> Result<IRNode<IRStatement>, IRError> {
-        // TODO
-        todo!("construct_ir_do_unless")
+        let expr = self.construct_ir_expression(expr)?;
+
+        let negated = self.construct_ir_boolean_negate(unless_expr)?;
+
+        if negated.expr_type != TypeResolution::Resolved(self.builtins.bool_t) {
+            return Err(IRError::TypeMismatch(
+                TypeResolution::Resolved(self.builtins.bool_t),
+                negated.expr_type,
+            ));
+        }
+
+        Ok(IRNode {
+            value: Box::new(IRStatement::IfStatement(IRIfStatement {
+                if_condition: negated.value,
+                if_body: expr.value,
+                else_ifs: Vec::new(),
+                else_body: None,
+            })),
+            expr_type: TypeResolution::Resolved(self.builtins.void_t),
+        })
     }
 
     pub fn construct_ir_do_statement(
@@ -694,10 +763,19 @@ impl<'a> TypeCheckingContext<'a> {
         let mut irstmt = self.construct_ir_statement(stmt)?;
 
         let var_id = match self.lookup(&name.value) {
-            Ok(i) => {
-                // TODO: check if it's a variable, and if it has the right type
-                i
-            }
+            Ok(i) => match i.get_as_variable(&self.symbol_table) {
+                Ok(v) => {
+                    if v.var_t != irstmt.expr_type.type_id_now_or_err()? {
+                        return Err(IRError::TypeMismatch(
+                            TypeResolution::Resolved(v.var_t),
+                            irstmt.expr_type,
+                        ));
+                    } else {
+                        v.id
+                    }
+                }
+                Err(_) => return Err(IRError::ReferedSymbolIsNotVariable(i)),
+            },
             Err(_) => {
                 let var_id = self.symbol_table.insert(
                     Symbol::Variable(match irstmt.expr_type {
@@ -756,8 +834,15 @@ impl<'a> TypeCheckingContext<'a> {
         func: IdentifierToken,
         args: Vec<Expression>,
     ) -> Result<IRNode<IRStatement>, IRError> {
-        // TODO: Implement function lookup for overloads
-        let f_id = self.lookup(&func.value)?;
+        let mut irargs = Vec::new();
+        let mut args_t = Vec::new();
+        for arg in args {
+            let irarg = self.construct_ir_expression(arg)?;
+            irargs.push(*irarg.value);
+            args_t.push(irarg.expr_type.type_id_now_or_err()?);
+        }
+
+        let f_id = self.lookup_function(&func.value, self.builtins.void_t, &[])?;
 
         let f_sym = f_id
             .get_symbol(&self.symbol_table)
@@ -770,14 +855,12 @@ impl<'a> TypeCheckingContext<'a> {
 
         let ret_t = func_t.return_type;
 
-        // TODO: Check that function is callable, and that arguments are valid (count + types)
-        let mut irargs = Vec::new();
-        for arg in args {
-            irargs.push(*self.construct_ir_expression(arg)?.value);
-        }
-
         Ok(IRNode {
-            value: Box::new(IRStatement::Take(IRExpression::Call(func, f_id, irargs))),
+            value: Box::new(IRStatement::Take(IRExpression::Call(
+                Some(func),
+                f_id,
+                irargs,
+            ))),
             expr_type: TypeResolution::Resolved(ret_t),
         })
     }
@@ -816,14 +899,28 @@ impl<'a> TypeCheckingContext<'a> {
         &mut self,
         stmts: Vec<Statement>,
     ) -> Result<IRNode<IRExpression>, IRError> {
+        let block_id = self.symbol_table.insert(
+            Symbol::Scope(Scope {
+                symbols: HashMap::new(),
+                id: SymbolId(0),
+                barrier: false,
+                parent: None,
+            }),
+            self.peek_id()?,
+        );
+        self.push(block_id);
+
         let mut ir_stmts = Vec::new();
         for stmt in stmts {
             let irstmt = self.construct_ir_statement(stmt)?;
             ir_stmts.push(*irstmt.value);
             // TODO: Check for return statments if they all return the same type, and if all code paths end up returning
         }
+
+        self.pop();
+
         Ok(IRNode {
-            value: Box::new(IRExpression::Block(ir_stmts)),
+            value: Box::new(IRExpression::Block(ir_stmts, block_id)),
             // FIXME: This is wrong, i'm lazy
             expr_type: TypeResolution::Resolved(self.builtins.void_t),
         })
@@ -838,11 +935,21 @@ impl<'a> TypeCheckingContext<'a> {
         let l = self.construct_ir_expression(l)?;
         let r = self.construct_ir_expression(r)?;
 
-        // TODO: Check types of `l` and `r`
+        let l_type = l.expr_type.type_id_now_or_err()?;
+        let r_type = r.expr_type.type_id_now_or_err()?;
+
+        let func_id =
+            self.lookup_function(op.internal_operator_function_magled(), l_type, &[r_type])?;
+
+        let ret_t = func_id
+            .get_as_function(&self.symbol_table)
+            .map_err(|e| IRError::InvalidFunctionSymbol(e))?
+            .func_t
+            .return_type;
 
         Ok(IRNode {
-            value: Box::new(IRExpression::Comparison(l.value, op, r.value)),
-            expr_type: TypeResolution::Resolved(self.builtins.bool_t),
+            value: Box::new(IRExpression::Call(None, func_id, vec![*l.value, *r.value])),
+            expr_type: TypeResolution::Resolved(ret_t),
         })
     }
 
@@ -855,11 +962,21 @@ impl<'a> TypeCheckingContext<'a> {
         let l = self.construct_ir_expression(l)?;
         let r = self.construct_ir_expression(r)?;
 
-        // TODO: Check types of `l` and `r`
+        let l_type = l.expr_type.type_id_now_or_err()?;
+        let r_type = r.expr_type.type_id_now_or_err()?;
+
+        let func_id =
+            self.lookup_function(op.internal_operator_function_magled(), l_type, &[r_type])?;
+
+        let ret_t = func_id
+            .get_as_function(&self.symbol_table)
+            .map_err(|e| IRError::InvalidFunctionSymbol(e))?
+            .func_t
+            .return_type;
 
         Ok(IRNode {
-            value: Box::new(IRExpression::BooleanOp(l.value, op, r.value)),
-            expr_type: TypeResolution::Resolved(self.builtins.bool_t),
+            value: Box::new(IRExpression::Call(None, func_id, vec![*l.value, *r.value])),
+            expr_type: TypeResolution::Resolved(ret_t),
         })
     }
 
@@ -869,11 +986,18 @@ impl<'a> TypeCheckingContext<'a> {
     ) -> Result<IRNode<IRExpression>, IRError> {
         let expr = self.construct_ir_expression(expr)?;
 
-        // Check if expression can be negated and use correct function
+        let func_id =
+            self.lookup_function("operator!negate", expr.expr_type.type_id_now_or_err()?, &[])?;
+
+        let ret_t = func_id
+            .get_as_function(&self.symbol_table)
+            .map_err(|e| IRError::InvalidFunctionSymbol(e))?
+            .func_t
+            .return_type;
 
         Ok(IRNode {
-            value: Box::new(IRExpression::BooleanNegate(expr.value)),
-            expr_type: expr.expr_type,
+            value: Box::new(IRExpression::Call(None, func_id, vec![*expr.value])),
+            expr_type: TypeResolution::Resolved(ret_t),
         })
     }
 

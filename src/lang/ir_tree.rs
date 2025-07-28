@@ -1,8 +1,4 @@
-use crate::lang::{
-    ast::{BooleanOperator, ComparisonOperator},
-    token::IdentifierToken,
-    types::SymbolId,
-};
+use crate::lang::{token::IdentifierToken, types::SymbolId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TypeResolution {
@@ -40,9 +36,11 @@ pub enum IRError {
     TypeMismatch(TypeResolution, TypeResolution), // Expected, Actual
     MultipleMainFunctionDeclarations(SymbolId),
     ReferedSymbolIsNotCallable(SymbolId),
+    ReferedSymbolIsNotVariable(SymbolId),
     TypeShouldBeResolved(TypeResolution),
     InvalidReferableSymbol(SymbolId),
     InvalidFunctionSymbol(SymbolId),
+    IllegalAccess(String, SymbolId),
     DuplicateArgumentName(String),
     DuplicateFunctionName(String),
     BuiltinError(BuiltinIRError),
@@ -58,11 +56,8 @@ pub enum IRError {
 pub enum IRExpression {
     IntI64(i64),
     Identifier(IdentifierToken, SymbolId),
-    Call(IdentifierToken, SymbolId, Vec<IRExpression>), // function name, function id, arguments
-    Comparison(Box<IRExpression>, ComparisonOperator, Box<IRExpression>),
-    BooleanOp(Box<IRExpression>, BooleanOperator, Box<IRExpression>),
-    BooleanNegate(Box<IRExpression>),
-    Block(Vec<IRStatement>),
+    Call(Option<IdentifierToken>, SymbolId, Vec<IRExpression>), // function name, function id, arguments
+    Block(Vec<IRStatement>, SymbolId),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
